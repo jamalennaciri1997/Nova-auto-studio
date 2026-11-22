@@ -86,15 +86,15 @@ fun StudioScreen() {
     when {
      current?.mime?.startsWith("video/") == true ->
       AndroidView(factory = { VideoView(it) }, update = { view ->
-       if (view.tag != current.uri) {
-        view.tag = current.uri
-        view.setVideoURI(current.uri)
+       if (view.tag != current!!.uri) {
+        view.tag = current!!.uri
+        view.setVideoURI(current!!.uri)
         view.setOnPreparedListener { player -> player.isLooping = true; view.start() }
        }
       }, modifier = Modifier.fillMaxSize())
      current?.mime?.startsWith("image/") == true ->
       AndroidView(factory = { ImageView(it).apply { scaleType = ImageView.ScaleType.FIT_CENTER } },
-       update = { it.setImageURI(current.uri) }, modifier = Modifier.fillMaxSize())
+       update = { it.setImageURI(current!!.uri) }, modifier = Modifier.fillMaxSize())
      else -> Text(if (current == null) "SELECT A CLIP TO PREVIEW" else "Audio selected", color = Color.White)
     }
    }
