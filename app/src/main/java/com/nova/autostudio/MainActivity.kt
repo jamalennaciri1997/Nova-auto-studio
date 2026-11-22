@@ -46,6 +46,9 @@ fun StudioScreen() {
  var prompt by remember { mutableStateOf("") }
  var status by remember { mutableStateOf("Import media to begin") }
  var selected by remember { mutableIntStateOf(-1) }
+ var trimStart by remember { mutableStateOf("0") }
+ var trimEnd by remember { mutableStateOf("10") }
+ var beats by remember { mutableStateOf<List<Long>>(emptyList()) }
  val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
   uris.forEach { uri ->
    val mime = context.contentResolver.getType(uri) ?: "application/octet-stream"
@@ -95,6 +98,42 @@ fun StudioScreen() {
      else -> Text(if (current == null) "SELECT A CLIP TO PREVIEW" else "Audio selected", color = Color.White)
     }
    }
+   Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+    OutlinedTextField(trimStart, { trimStart = it }, Modifier.weight(1f), label = { Text("From (s)") }, singleLine = true)
+    OutlinedTextField(trimEnd, { trimEnd = it }, Modifier.weight(1f), label = { Text("To (s)") }, singleLine = true)
+    Button(onClick = {
+     val clip = current
+     val from = trimStart.toDoubleOrNull()
+     val to = trimEnd.toDoubleOrNull()
+     if (clip == null || !clip.mime.startsWith("video/") || from == null || to == null || from < 0 || to <= from) status = "Select video and valid times"
+     else scope.launch {
+      status = "Exporting trimmed MP4…"
+      try {
+       val file = withContext(Dispatchers.IO) { VideoExporter.trim(context, clip.uri, (from * 1_000_000).toLong(), (to * 1_000_000).toLong()) }
+       val shareUri = FileProvider.getUriForFile(context, "${context.packageName}.files", file)
+       context.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
+        type = "video/mp4"; putExtra(Intent.EXTRA_STREAM, shareUri)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+       }, "Save or share trimmed video"))
+       status = "Video exported"
+      } catch (e: Exception) { status = e.message ?: "Export failed" }
+     }
+    }) { Text("Trim") }
+   }
+   Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+    OutlinedButton(onClick = {
+     val clip = current
+     if (clip == null || (!clip.mime.startsWith("audio/") && !clip.mime.startsWith("video/"))) status = "Select audio or video"
+     else scope.launch {
+      status = "Analyzing beats…"
+      try {
+       beats = withContext(Dispatchers.IO) { BeatDetector.analyze(context, clip.uri) }
+       status = "Detected ${beats.size} beat candidates"
+      } catch (e: Exception) { status = e.message ?: "Beat analysis failed" }
+     }
+    }) { Text("Find beats") }
+    Text(beats.take(8).joinToString(" · ") { "${it / 1000.0}s" }, color = Color.LightGray, fontSize = 11.sp)
+   }
    Text("TIMELINE · ${clips.size} clips", color = Color.White)
    LazyColumn(Modifier.fillMaxWidth().heightIn(max = 135.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
     itemsIndexed(clips) { index, clip ->
@@ -108,7 +147,17 @@ fun StudioScreen() {
    Row(verticalAlignment = Alignment.CenterVertically) {
     OutlinedTextField(value = prompt, onValueChange = { prompt = it }, modifier = Modifier.weight(1f), placeholder = { Text("Describe an edit…") }, singleLine = true)
     Spacer(Modifier.width(8.dp))
-    Button(onClick = { status = "AI editing is not connected yet"; prompt = "" }) { Text("Send") }
+    Button(onClick = {
+     val command = prompt.trim().lowercase()
+     when {
+      command.contains("beat") || command.contains("إيقاع") || command.contains("ايقاع") -> status = "Use Find beats to analyze selected media"
+      command.contains("trim") || command.contains("قص") -> status = "Set From/To seconds and tap Trim"
+      command.contains("extract") || command.contains("صوت") -> status = "Select a video and tap Extract"
+      command.contains("import") || command.contains("زيد") -> picker.launch(arrayOf("image/*", "video/*", "audio/*"))
+      else -> status = "Available: import, trim, extract audio, detect beats. Cloud AI is not connected."
+     }
+     prompt = ""
+    }) { Text("Send") }
    }
    Text(status, color = Color.LightGray, fontSize = 12.sp)
   }
