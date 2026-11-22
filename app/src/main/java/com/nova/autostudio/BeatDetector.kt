@@ -24,7 +24,8 @@ object BeatDetector {
    val codec = MediaCodec.createDecoderByType(mime)
    extractor.selectTrack(track)
    val sampleRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
-   val samplesPerWindow = (sampleRate / 20).coerceAtLeast(1)
+   val channels = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT).coerceAtLeast(1)
+   val samplesPerWindow = (sampleRate * channels / 20).coerceAtLeast(1)
    val energies = mutableListOf<Double>()
    val times = mutableListOf<Long>()
    try {
