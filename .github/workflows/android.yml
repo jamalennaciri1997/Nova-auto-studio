@@ -14,7 +14,11 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - uses: android-actions/setup-android@v3
+      - name: Verify preinstalled Android SDK
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          test -d "$ANDROID_HOME/platforms" || exit 1
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
       - name: Install Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
