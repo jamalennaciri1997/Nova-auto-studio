@@ -6,6 +6,7 @@ internal data class EditCommand(
     val fps: Int?,
     val syncToBeats: Boolean,
     val cutFirst: Boolean,
+    val strongestFirst: Boolean = false,
 ) {
     companion object {
         fun parse(input: String): EditCommand {
@@ -23,11 +24,12 @@ internal data class EditCommand(
             val fps = Regex("""\b(30|60)\s*fps\b""").find(text)?.groupValues?.get(1)?.toInt()
             val beats = listOf("beat", "إيقاع", "ايقاع", "ريتم").any(text::contains)
             val cut = listOf("trim", "قص", "قطع").any(text::contains) && !beats
-            require(seconds != null || portrait != null || fps != null || beats) {
+            val strongest = listOf("strongest", "best shot", "أقوى", "اقوى", "أحسن", "احسن").any(text::contains)
+            require(seconds != null || portrait != null || fps != null || beats || strongest) {
                 "Try «دير ليا 15 ثانية بالطول مع الإيقاع» or «قص أول 3 ثواني»"
             }
             require(!cut || seconds != null) { "Specify how many seconds to keep" }
-            return EditCommand(seconds?.times(1000), portrait, fps, beats, cut)
+            return EditCommand(seconds?.times(1000), portrait, fps, beats, cut, strongest)
         }
     }
 }

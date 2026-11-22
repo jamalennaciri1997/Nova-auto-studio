@@ -347,8 +347,14 @@ private fun StudioScreen() {
                             if (command.cutFirst && duration != null) {
                                 val clip = clips.getOrNull(selected) ?: error("Select a clip to trim")
                                 clips[selected] = clip.copy(endMs = minOf(clip.endMs, clip.startMs + duration))
-                            } else if (duration != null || beats.isNotEmpty()) {
-                                val plan = planMontage(clips.toList(), duration, beats)
+                            } else if (duration != null || beats.isNotEmpty() || command.strongestFirst) {
+                                val timeline = clips.toList()
+                                val ordered = if (command.strongestFirst) {
+                                    withContext(Dispatchers.IO) { OpeningShot.choose(context, timeline) }
+                                } else timeline
+                                val plan = if (duration != null || beats.isNotEmpty()) {
+                                    planMontage(ordered, duration, beats)
+                                } else ordered
                                 clips.clear()
                                 clips.addAll(plan)
                                 selected = 0
