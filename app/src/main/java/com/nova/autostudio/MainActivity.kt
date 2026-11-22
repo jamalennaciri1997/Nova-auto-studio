@@ -139,7 +139,15 @@ fun StudioScreen() {
     itemsIndexed(clips) { index, clip ->
      Row(Modifier.fillMaxWidth().background(if (selected == index) Color(0xFF49416B) else Color(0xFF292C39), RoundedCornerShape(6.dp)).clickable { selected = index }.padding(8.dp), horizontalArrangement = Arrangement.SpaceBetween) {
       Text("${index + 1}. ${clip.title.take(28)}", color = Color.White)
-      Text("Remove", color = Color.White, modifier = Modifier.clickable { clips.removeAt(index); selected = -1 })
+      Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+       Text("↑", color = Color.White, modifier = Modifier.clickable {
+        if (index > 0) { val item = clips.removeAt(index); clips.add(index - 1, item); selected = index - 1 }
+       })
+       Text("↓", color = Color.White, modifier = Modifier.clickable {
+        if (index < clips.lastIndex) { val item = clips.removeAt(index); clips.add(index + 1, item); selected = index + 1 }
+       })
+       Text("Remove", color = Color.White, modifier = Modifier.clickable { clips.removeAt(index); selected = -1 })
+      }
      }
     }
    }
