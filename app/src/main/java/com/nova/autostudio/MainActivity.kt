@@ -3,6 +3,8 @@ package com.nova.autostudio
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.widget.ImageView
+import android.widget.VideoView
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -18,10 +20,16 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.FileProvider
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
-data class StudioClip(val uri: Uri, val title: String, val type: String)
+data class StudioClip(val uri: Uri, val title: String, val mime: String)
 
 class MainActivity : ComponentActivity() {
  override fun onCreate(savedInstanceState: Bundle?) {
@@ -32,46 +40,73 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 fun StudioScreen() {
+ val context = LocalContext.current
+ val scope = rememberCoroutineScope()
  val clips = remember { mutableStateListOf<StudioClip>() }
  var prompt by remember { mutableStateOf("") }
- var status by remember { mutableStateOf("Add media to start your project") }
+ var status by remember { mutableStateOf("Import media to begin") }
  var selected by remember { mutableIntStateOf(-1) }
  val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
   uris.forEach { uri ->
-   val type = when {
-    uri.toString().contains("audio") -> "Audio"
-    else -> "Media"
-   }
-   clips.add(StudioClip(uri, uri.lastPathSegment?.substringAfterLast('/') ?: "Untitled", type))
+   val mime = context.contentResolver.getType(uri) ?: "application/octet-stream"
+   clips.add(StudioClip(uri, uri.lastPathSegment?.substringAfterLast('/') ?: "Untitled", mime))
   }
-  if (uris.isNotEmpty()) status = "Imported ${uris.size} file(s)"
+  if (uris.isNotEmpty()) status = "Imported ${uris.size} files"
  }
+ val current = clips.getOrNull(selected)
  MaterialTheme(colorScheme = darkColorScheme(primary = Color(0xFF9B86FF))) {
-  Column(Modifier.fillMaxSize().background(Color(0xFF101118)).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-   Text("NOVA AUTO STUDIO", fontSize = 23.sp, color = Color.White)
-   Text("Android editor · early prototype", color = Color.LightGray)
+  Column(Modifier.fillMaxSize().background(Color(0xFF101118)).padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+   Text("NOVA AUTO STUDIO", fontSize = 22.sp, color = Color.White)
    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-    Button(onClick = { picker.launch(arrayOf("image/*", "video/*", "audio/*")) }) { Text("+ Import") }
-    OutlinedButton(onClick = { clips.clear(); selected = -1; status = "Project cleared" }) { Text("New project") }
+    Button(onClick = { picker.launch(arrayOf("image/*", "video/*", "audio/*")) }) { Text("Import") }
+    OutlinedButton(onClick = { clips.clear(); selected = -1; status = "Project cleared" }) { Text("New") }
+    OutlinedButton(onClick = {
+     val clip = current
+     if (clip == null || !clip.mime.startsWith("video/")) status = "Select a video first"
+     else scope.launch {
+      status = "Extracting audio…"
+      try {
+       val file = withContext(Dispatchers.IO) { AudioExtractor.extract(context, clip.uri) }
+       val shareUri = FileProvider.getUriForFile(context, "${context.packageName}.files", file)
+       val share = Intent(Intent.ACTION_SEND).apply {
+        type = "audio/mp4"
+        putExtra(Intent.EXTRA_STREAM, shareUri)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+       }
+       context.startActivity(Intent.createChooser(share, "Save or share extracted audio"))
+       status = "Audio extracted"
+      } catch (e: Exception) { status = e.message ?: "Audio extraction failed" }
+     }
+    }) { Text("Extract") }
    }
-   Box(Modifier.fillMaxWidth().weight(1f).background(Color(0xFF1C1E29), RoundedCornerShape(14.dp)), contentAlignment = Alignment.Center) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-     Text("PREVIEW", color = Color.White, fontSize = 20.sp)
-     Text(if (selected in clips.indices) clips[selected].title else "Select a clip in timeline", color = Color.LightGray)
+   Box(Modifier.fillMaxWidth().weight(1f).background(Color(0xFF1C1E29), RoundedCornerShape(12.dp)), contentAlignment = Alignment.Center) {
+    when {
+     current?.mime?.startsWith("video/") == true ->
+      AndroidView(factory = { VideoView(it) }, update = { view ->
+       if (view.tag != current.uri) {
+        view.tag = current.uri
+        view.setVideoURI(current.uri)
+        view.setOnPreparedListener { player -> player.isLooping = true; view.start() }
+       }
+      }, modifier = Modifier.fillMaxSize())
+     current?.mime?.startsWith("image/") == true ->
+      AndroidView(factory = { ImageView(it).apply { scaleType = ImageView.ScaleType.FIT_CENTER } },
+       update = { it.setImageURI(current.uri) }, modifier = Modifier.fillMaxSize())
+     else -> Text(if (current == null) "SELECT A CLIP TO PREVIEW" else "Audio selected", color = Color.White)
     }
    }
-   Text("TIMELINE  •  ${clips.size} clips", color = Color.White)
-   LazyColumn(Modifier.fillMaxWidth().heightIn(max = 150.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+   Text("TIMELINE · ${clips.size} clips", color = Color.White)
+   LazyColumn(Modifier.fillMaxWidth().heightIn(max = 135.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
     itemsIndexed(clips) { index, clip ->
-     Row(Modifier.fillMaxWidth().background(if (selected == index) Color(0xFF49416B) else Color(0xFF292C39), RoundedCornerShape(6.dp)).clickable { selected = index }.padding(10.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-      Text("${index + 1}. ${clip.title.take(30)}", color = Color.White)
-      Text("×", color = Color.White, modifier = Modifier.clickable { clips.removeAt(index); selected = -1 })
+     Row(Modifier.fillMaxWidth().background(if (selected == index) Color(0xFF49416B) else Color(0xFF292C39), RoundedCornerShape(6.dp)).clickable { selected = index }.padding(8.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+      Text("${index + 1}. ${clip.title.take(28)}", color = Color.White)
+      Text("Remove", color = Color.White, modifier = Modifier.clickable { clips.removeAt(index); selected = -1 })
      }
     }
    }
    Text("AI EDITOR", color = Color.White)
    Row(verticalAlignment = Alignment.CenterVertically) {
-    OutlinedTextField(value = prompt, onValueChange = { prompt = it }, modifier = Modifier.weight(1f), placeholder = { Text("Describe the edit…") }, singleLine = true)
+    OutlinedTextField(value = prompt, onValueChange = { prompt = it }, modifier = Modifier.weight(1f), placeholder = { Text("Describe an edit…") }, singleLine = true)
     Spacer(Modifier.width(8.dp))
     Button(onClick = { status = "AI editing is not connected yet"; prompt = "" }) { Text("Send") }
    }
