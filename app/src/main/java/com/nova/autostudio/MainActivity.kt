@@ -30,6 +30,8 @@ import androidx.core.content.FileProvider
 import java.io.File
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -40,6 +42,9 @@ data class StudioClip(
     val durationMs: Long,
     val startMs: Long = 0,
     val endMs: Long = durationMs,
+    val impact: Float = 0f,
+    val animate: Boolean = false,
+    val glint: Glint? = null,
 )
 
 class MainActivity : ComponentActivity() {
@@ -53,31 +58,50 @@ class MainActivity : ComponentActivity() {
 private fun StudioScreen() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val clips = remember { mutableStateListOf<StudioClip>() }
-    var selected by remember { mutableIntStateOf(-1) }
-    var music by remember { mutableStateOf<StudioClip?>(null) }
+    val storage = remember(context) { StudioStorage(context) }
+    val restored = remember(storage) { storage.restore() }
+    val clips = remember { mutableStateListOf<StudioClip>().apply { addAll(restored.clips) } }
+    val resources = remember { mutableStateListOf<StudioClip>().apply { addAll(restored.resources) } }
+    var reference by remember { mutableStateOf(restored.reference) }
+    var referenceAudio by remember { mutableStateOf(restored.referenceAudio) }
+    var styleNames by remember { mutableStateOf(storage.styleNames()) }
+    var styleMenu by remember { mutableStateOf(false) }
+    var nameStyle by remember { mutableStateOf(false) }
+    var styleName by remember { mutableStateOf("") }
+    var progress by remember { mutableStateOf<Float?>(null) }
+    var job by remember { mutableStateOf<Job?>(null) }
+    var selected by remember { mutableIntStateOf(if (clips.isEmpty()) -1 else 0) }
+    var music by remember { mutableStateOf(restored.music) }
     var rendered by remember { mutableStateOf<File?>(null) }
     var showResult by remember { mutableStateOf(false) }
-    var portrait by remember { mutableStateOf(true) }
-    var fps by remember { mutableIntStateOf(30) }
+    var portrait by remember { mutableStateOf(restored.portrait) }
+    var fps by remember { mutableIntStateOf(restored.fps) }
     var prompt by remember { mutableStateOf("") }
     var status by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var askNew by remember { mutableStateOf(false) }
 
+    LaunchedEffect(storage) {
+        snapshotFlow { StudioProject(clips.toList(), resources.toList(), music, reference, portrait, fps, referenceAudio) }
+            .collect { storage.save(it) }
+    }
+
     fun work(message: String, action: suspend () -> Unit) {
         if (busy) return
         busy = true
         status = message
-        scope.launch {
+        progress = null
+        job = scope.launch {
             try {
                 action()
             } catch (cancelled: CancellationException) {
+                status = "Cancelled"
                 throw cancelled
             } catch (error: Exception) {
                 status = error.message ?: "Operation failed"
             } finally {
                 busy = false
+                progress = null
             }
         }
     }
@@ -87,34 +111,65 @@ private fun StudioScreen() {
         rendered = null
     }
 
+    fun readClip(uri: Uri): StudioClip {
+        runCatching { context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+        val mime = context.contentResolver.getType(uri).orEmpty()
+        val duration = when {
+            mime.startsWith("image/") -> 3000L
+            mime.startsWith("video/") || mime.startsWith("audio/") -> MediaInfo.durationMs(context, uri)
+            else -> 0L
+        }
+        require(duration >= 80L) { "Unsupported or empty media" }
+        val title = context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+            ?.use { if (it.moveToFirst()) it.getString(0) else null }
+        return StudioClip(uri, title ?: "Untitled", mime, duration)
+    }
+
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isNotEmpty()) work("Reading media…") {
-            val imported = withContext(Dispatchers.IO) {
-                uris.mapNotNull { uri ->
-                    runCatching {
-                        val mime = context.contentResolver.getType(uri).orEmpty()
-                        val duration = when {
-                            mime.startsWith("image/") -> 3000L
-                            mime.startsWith("video/") || mime.startsWith("audio/") ->
-                                MediaInfo.durationMs(context, uri)
-                            else -> 0L
-                        }
-                        require(duration > 0)
-                        val title = context.contentResolver.query(
-                            uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null
-                        )?.use { if (it.moveToFirst()) it.getString(0) else null }
-                        StudioClip(uri, title ?: "Untitled", mime, duration)
-                    }.getOrNull()
-                }
+            val imported = mutableListOf<StudioClip>()
+            uris.forEachIndexed { index, uri ->
+                withContext(Dispatchers.IO) { runCatching { readClip(uri) }.getOrNull() }?.let(imported::add)
+                progress = (index + 1f) / uris.size
             }
-            val videosAndPhotos = imported.filterNot { it.mime.startsWith("audio/") }
+            val visuals = imported.filterNot { it.mime.startsWith("audio/") }
             music = imported.lastOrNull { it.mime.startsWith("audio/") } ?: music
-            if (videosAndPhotos.isNotEmpty()) {
+            if (visuals.isNotEmpty()) {
                 selected = clips.size
-                clips.addAll(videosAndPhotos)
+                clips.addAll(visuals)
+                resources.addAll(visuals)
             }
             if (imported.isNotEmpty()) edit()
             status = "Imported ${imported.size} of ${uris.size} files"
+        }
+    }
+
+    val referencePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) work("Analyzing reference…") {
+            val analyzed = withContext(Dispatchers.IO) {
+                runCatching { context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+                ReferenceEdit.analyze(context, uri) { value -> withContext(Dispatchers.Main) { progress = value } }
+            }
+            reference = analyzed
+            status = "Reference analyzed · ${analyzed.shots.size} shots"
+        }
+    }
+
+    val replacement = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        val index = selected
+        val before = clips.getOrNull(index)
+        if (uri != null && before != null) work("Reading replacement…") {
+            val media = withContext(Dispatchers.IO) { readClip(uri) }
+            val length = before.endMs - before.startMs
+            val image = media.mime.startsWith("image/")
+            require(image || (media.mime.startsWith("video/") && media.durationMs >= length)) {
+                "Choose a photo or a video at least ${length / 1000.0}s long"
+            }
+            val start = if (image) 0L else (media.durationMs - length) / 3
+            clips[index] = media.copy(startMs = start, endMs = start + length,
+                impact = before.impact, animate = before.animate, glint = before.glint)
+            edit()
+            status = "Shot replaced"
         }
     }
 
@@ -124,7 +179,21 @@ private fun StudioScreen() {
             withContext(Dispatchers.IO) {
                 val output = context.contentResolver.openOutputStream(uri)
                     ?: error("Cannot open the destination")
-                output.use { stream -> file.inputStream().use { it.copyTo(stream) } }
+                val total = file.length().coerceAtLeast(1)
+                output.use { stream ->
+                    file.inputStream().use { input ->
+                        val buffer = ByteArray(64 * 1024)
+                        var saved = 0L
+                        while (true) {
+                            ensureActive()
+                            val count = input.read(buffer)
+                            if (count < 0) break
+                            stream.write(buffer, 0, count)
+                            saved += count
+                            withContext(Dispatchers.Main) { progress = saved.toFloat() / total }
+                        }
+                    }
+                }
             }
             status = "MP4 saved"
         }
@@ -140,9 +209,12 @@ private fun StudioScreen() {
     }
 
     suspend fun export() {
+        progress = null
+        val soundtrack = music?.uri ?: referenceAudio
         val result = ProjectExporter.render(
-            context, clips.toList(), music?.uri,
-            if (portrait) 720 else 1280, if (portrait) 1280 else 720, fps
+            context, clips.toList(), soundtrack,
+            if (portrait) 720 else 1280, if (portrait) 1280 else 720, fps,
+            onProgress = { progress = it },
         )
         rendered = result
         showResult = true
@@ -176,14 +248,23 @@ private fun StudioScreen() {
             },
             bottomBar = {
                 Surface(color = MaterialTheme.colorScheme.surface, tonalElevation = 3.dp) {
+                    Column(Modifier.fillMaxWidth()) {
+                        if (busy) {
+                            val fraction = progress
+                            if (fraction == null) LinearProgressIndicator(Modifier.fillMaxWidth())
+                            else LinearProgressIndicator(progress = { fraction }, modifier = Modifier.fillMaxWidth())
+                        }
                     Row(
                         Modifier.fillMaxWidth().navigationBarsPadding().padding(12.dp),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Text(status, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                        val label = if (busy) progress?.let { "$status · ${(it * 100).toInt()}%" } ?: status else status
+                        Text(label, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
                         val result = rendered
-                        if (result != null) {
+                        if (busy) {
+                            TextButton(onClick = { job?.cancel() }) { Text("Cancel") }
+                        } else if (result != null) {
                             TextButton(onClick = { share(result, "video/mp4") }, enabled = !busy) { Text("Share") }
                             Button(onClick = { save.launch("NOVA-Studio.mp4") }, enabled = !busy) { Text("Save MP4") }
                         } else {
@@ -191,6 +272,7 @@ private fun StudioScreen() {
                                 Text("Export MP4")
                             }
                         }
+                    }
                     }
                 }
             },
@@ -256,6 +338,50 @@ private fun StudioScreen() {
                     }
                 }
 
+                Text("Video reference", style = MaterialTheme.typography.titleMedium)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(enabled = !busy, onClick = { referencePicker.launch(arrayOf("video/*")) }) {
+                        Text(if (reference == null) "Choose video" else "Change video")
+                    }
+                    Box {
+                        OutlinedButton(enabled = !busy && styleNames.isNotEmpty(), onClick = { styleMenu = true }) {
+                            Text("Saved styles")
+                        }
+                        DropdownMenu(expanded = styleMenu, onDismissRequest = { styleMenu = false }) {
+                            styleNames.forEach { name ->
+                                DropdownMenuItem(text = { Text(name) }, onClick = {
+                                    reference = storage.loadStyle(name)
+                                    styleMenu = false
+                                    status = "Style loaded"
+                                })
+                            }
+                        }
+                    }
+                }
+                reference?.let { style ->
+                    Text("${style.shots.size} shots · ${style.shots.sumOf { it.durationMs } / 1000.0}s")
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(enabled = !busy && clips.isNotEmpty(), onClick = {
+                            work("Matching shots…") {
+                                val inputs = resources.toList().ifEmpty { clips.toList() }
+                                val plan = withContext(Dispatchers.Default) { ReferenceEdit.match(style, inputs) }
+                                clips.clear()
+                                clips.addAll(plan)
+                                selected = 0
+                                portrait = style.portrait
+                                music = null
+                                referenceAudio = style.source.takeIf { style.hasAudio }
+                                edit()
+                                status = "Rendering preview…"
+                                export()
+                            }
+                        }) { Text("Match & preview") }
+                        TextButton(enabled = !busy, onClick = { styleName = ""; nameStyle = true }) {
+                            Text("Save style")
+                        }
+                    }
+                }
+
                 Text("Timeline · ${clips.size}", style = MaterialTheme.typography.titleMedium)
                 clips.forEachIndexed { index, clip ->
                     Surface(
@@ -290,6 +416,36 @@ private fun StudioScreen() {
                 }
 
                 if (current != null) {
+                    TextButton(enabled = !busy, onClick = { replacement.launch(arrayOf("image/*", "video/*")) }) {
+                        Text("Replace selected shot")
+                    }
+                    if (current.animate) {
+                        Text("Impact")
+                        Slider(value = current.impact, enabled = !busy, onValueChange = { amount ->
+                            clips[selected] = current.copy(impact = amount)
+                            edit()
+                        })
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Sparkle", Modifier.weight(1f))
+                        Switch(checked = current.glint != null, enabled = !busy, onCheckedChange = { enabled ->
+                            clips[selected] = current.copy(glint = if (enabled) {
+                                Glint(minOf(220L, (current.endMs - current.startMs) / 2), 0.5f, 0.5f)
+                            } else null)
+                            edit()
+                        })
+                    }
+                    current.glint?.let { glint ->
+                        Text("Sparkle position")
+                        Slider(value = glint.x, enabled = !busy, onValueChange = {
+                            clips[selected] = current.copy(glint = glint.copy(x = it))
+                            edit()
+                        })
+                        Slider(value = glint.y, enabled = !busy, onValueChange = {
+                            clips[selected] = current.copy(glint = glint.copy(y = it))
+                            edit()
+                        })
+                    }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                         OutlinedTextField(from, { from = it }, Modifier.weight(1f), label = { Text("From (s)") },
                             enabled = !busy && current.mime.startsWith("video/"), singleLine = true)
@@ -311,10 +467,14 @@ private fun StudioScreen() {
                 }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(music?.let { "Music · ${it.title}" } ?: "Import audio to add music",
+                    Text(music?.let { "Music · ${it.title}" }
+                        ?: if (referenceAudio != null) "Reference audio" else "Import audio to add music",
                         Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
-                    if (music != null) {
-                        TextButton(enabled = !busy, onClick = { music = null; edit() }) { Text("Remove") }
+                    if (music != null || referenceAudio != null) {
+                        TextButton(enabled = !busy, onClick = {
+                            if (music != null) music = null else referenceAudio = null
+                            edit()
+                        }) { Text("Remove") }
                     }
                     if (current?.mime?.startsWith("video/") == true) {
                         TextButton(enabled = !busy, onClick = {
@@ -369,6 +529,22 @@ private fun StudioScreen() {
                 ) { Text("Create and preview") }
             }
         }
+        if (nameStyle) {
+            AlertDialog(
+                onDismissRequest = { nameStyle = false },
+                title = { Text("Save reference style") },
+                text = { OutlinedTextField(styleName, { styleName = it }, label = { Text("Style name") }) },
+                confirmButton = {
+                    val name = styleName.trim()
+                    TextButton(enabled = name.isNotEmpty() && name !in styleNames, onClick = {
+                        reference?.let { storage.saveStyle(name, it) }
+                        styleNames = storage.styleNames()
+                        nameStyle = false
+                    }) { Text("Save") }
+                },
+                dismissButton = { TextButton(onClick = { nameStyle = false }) { Text("Cancel") } },
+            )
+        }
         if (askNew) {
             AlertDialog(
                 onDismissRequest = { askNew = false },
@@ -378,6 +554,9 @@ private fun StudioScreen() {
                     TextButton(onClick = {
                         askNew = false
                         clips.clear()
+                        resources.clear()
+                        reference = null
+                        referenceAudio = null
                         music = null
                         selected = -1
                         status = ""

@@ -6,12 +6,14 @@ import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.net.Uri
 import java.nio.ByteOrder
-import kotlin.math.abs
+import kotlin.math.PI
+import kotlin.math.exp
 import kotlin.math.sqrt
 
 /** On-device beat candidates from decoded PCM energy peaks. No network required. */
 object BeatDetector {
- fun analyze(context: Context, uri: Uri, maxDurationSeconds: Int = 180): List<Long> {
+ fun analyze(context: Context, uri: Uri, maxDurationSeconds: Int = 180, bassOnly: Boolean = false,
+  checkCancelled: () -> Unit = {}): List<Long> {
   val fd = context.contentResolver.openAssetFileDescriptor(uri, "r") ?: error("Cannot open audio")
   val extractor = MediaExtractor()
   try {
@@ -34,10 +36,14 @@ object BeatDetector {
     val info = MediaCodec.BufferInfo()
     var inputDone = false
     var outputDone = false
+    val smoothing = 1 - exp(-2 * PI * 135 / sampleRate)
+    val lowPass = DoubleArray(channels)
+    var channel = 0
     var accumulated = 0.0
     var sampleCount = 0
     var windowIndex = 0L
     while (!outputDone) {
+     checkCancelled()
      if (!inputDone) {
       val index = codec.dequeueInputBuffer(10_000)
       if (index >= 0) {
@@ -54,12 +60,22 @@ object BeatDetector {
      }
      val index = codec.dequeueOutputBuffer(info, 10_000)
      if (index >= 0) {
-      val output = codec.getOutputBuffer(index)!!
+      val output = codec.getOutputBuffer(index)
+      if (info.size == 0 || output == null) {
+       codec.releaseOutputBuffer(index, false)
+       outputDone = info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
+       continue
+      }
       val pcm = output.duplicate().order(ByteOrder.LITTLE_ENDIAN)
       pcm.position(info.offset)
       pcm.limit(info.offset + info.size)
       while (pcm.remaining() >= 2) {
-       val value = pcm.short.toDouble() / 32768.0
+       var value = pcm.short.toDouble() / 32768.0
+       if (bassOnly) {
+        lowPass[channel] += smoothing * (value - lowPass[channel])
+        value = lowPass[channel]
+        channel = (channel + 1) % channels
+       }
        accumulated += value * value
        sampleCount++
        if (sampleCount >= samplesPerWindow) {
@@ -78,7 +94,7 @@ object BeatDetector {
    val beats = mutableListOf<Long>()
    for (i in 4 until energies.size - 4) {
     val avg = energies.subList(i - 4, i + 5).average()
-    if (energies[i] > avg * 1.45 && energies[i] > energies[i-1] && energies[i] >= energies[i+1] &&
+    if (energies[i] > avg * (if (bassOnly) 1.22 else 1.45) && energies[i] > energies[i-1] && energies[i] >= energies[i+1] &&
         (beats.isEmpty() || times[i] - beats.last() >= 180L)) beats.add(times[i])
    }
    return beats
