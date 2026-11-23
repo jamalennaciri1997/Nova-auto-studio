@@ -66,9 +66,12 @@ internal object ReferenceEdit {
             require(changes.isNotEmpty()) { "Cannot decode the reference video" }
             progress(0.9f)
             val coroutine = currentCoroutineContext()
-            val bass = if (hasAudio) {
-                BeatDetector.analyze(context, uri, bassOnly = true, checkCancelled = { coroutine.ensureActive() })
-            } else emptyList()
+            val bass = mutableListOf<Pair<Long, Float>>()
+            if (hasAudio) {
+                BeatDetector.analyze(context, uri, bassOnly = true, checkCancelled = { coroutine.ensureActive() }) {
+                    time, strength -> bass.add(time to strength)
+                }
+            }
             val boundaries = mutableListOf(0L)
             for (index in changes.indices) {
                 val (time, value) = changes[index]
@@ -81,8 +84,9 @@ internal object ReferenceEdit {
             boundaries.add(duration)
             val shots = boundaries.zipWithNext().map { (start, end) ->
                 val impact = if (start == 0L) 0f else {
-                    val distance = bass.minOfOrNull { abs(it - start) } ?: Long.MAX_VALUE
-                    if (distance <= 140L) (1f - distance / 220f).coerceIn(0f, 1f) else 0f
+                    val beat = bass.minByOrNull { abs(it.first - start) }
+                    val distance = beat?.let { abs(it.first - start) } ?: Long.MAX_VALUE
+                    if (beat != null && distance <= 140L) beat.second * (1f - distance / 220f) else 0f
                 }
                 val flash = flashes.firstOrNull { it.timeMs - start >= 120 && end - it.timeMs >= 120 }
                 ReferenceShot(end - start, impact, flash?.copy(timeMs = flash.timeMs - start))
@@ -142,7 +146,11 @@ internal object ReferenceEdit {
                     val clip = inputs[index]
                     val capacity = clip.endMs - clip.startMs
                     val image = clip.mime.startsWith("image/")
-                    val length = if (image) remaining else minOf(remaining, capacity)
+                    val length = when {
+                        image || remaining <= capacity -> remaining
+                        remaining - capacity < 100L -> remaining - 100L
+                        else -> capacity
+                    }
                     val room = (capacity - length).coerceAtLeast(0)
                     val fraction = listOf(0.4, 0.72, 0.1, 0.55)[useCount[index]++ % 4]
                     val start = if (image) 0 else clip.startMs + (room * fraction).toLong()

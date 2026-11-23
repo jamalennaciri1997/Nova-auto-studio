@@ -13,7 +13,7 @@ import kotlin.math.sqrt
 /** On-device beat candidates from decoded PCM energy peaks. No network required. */
 object BeatDetector {
  fun analyze(context: Context, uri: Uri, maxDurationSeconds: Int = 180, bassOnly: Boolean = false,
-  checkCancelled: () -> Unit = {}): List<Long> {
+  checkCancelled: () -> Unit = {}, onBeat: (Long, Float) -> Unit = { _, _ -> }): List<Long> {
   val fd = context.contentResolver.openAssetFileDescriptor(uri, "r") ?: error("Cannot open audio")
   val extractor = MediaExtractor()
   try {
@@ -92,10 +92,14 @@ object BeatDetector {
     }
    } finally { codec.stop(); codec.release() }
    val beats = mutableListOf<Long>()
+   val peak = energies.maxOrNull()?.coerceAtLeast(0.0001) ?: 1.0
    for (i in 4 until energies.size - 4) {
     val avg = energies.subList(i - 4, i + 5).average()
     if (energies[i] > avg * (if (bassOnly) 1.22 else 1.45) && energies[i] > energies[i-1] && energies[i] >= energies[i+1] &&
-        (beats.isEmpty() || times[i] - beats.last() >= 180L)) beats.add(times[i])
+        (beats.isEmpty() || times[i] - beats.last() >= 180L)) {
+     beats.add(times[i])
+     onBeat(times[i], sqrt(energies[i] / peak).toFloat())
+    }
    }
    return beats
   } finally { extractor.release(); fd.close() }
