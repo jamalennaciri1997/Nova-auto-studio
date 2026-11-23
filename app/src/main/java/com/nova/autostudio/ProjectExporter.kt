@@ -9,6 +9,8 @@ import androidx.annotation.OptIn
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.common.audio.ChannelMixingAudioProcessor
+import androidx.media3.common.audio.ChannelMixingMatrix
 import androidx.media3.effect.MatrixTransformation
 import androidx.media3.effect.Presentation
 import androidx.media3.transformer.Composition
@@ -36,6 +38,7 @@ object ProjectExporter {
         width: Int,
         height: Int,
         fps: Int,
+        musicVolume: Float = 1f,
         onProgress: (Float?) -> Unit = {},
     ): File = suspendCancellableCoroutine { continuation ->
         val visuals = clips.filterNot { it.mime.startsWith("audio/") }
@@ -53,11 +56,15 @@ object ProjectExporter {
                         .build()
                 )
             }
+            val removeAudio = image || (music != null && clip.sourceVolume == 0f)
+            val audioEffects = if (music != null && !removeAudio && clip.sourceVolume < 1f) {
+                listOf(volume(clip.sourceVolume))
+            } else emptyList()
             EditedMediaItem.Builder(media.build())
                 .setFrameRate(fps)
-                .setRemoveAudio(music != null || image)
+                .setRemoveAudio(removeAudio)
                 .setEffects(
-                    Effects(emptyList(), buildList {
+                    Effects(audioEffects, buildList {
                         add(Presentation.createForWidthAndHeight(
                             width, height,
                             if (clip.animate) Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP
@@ -73,11 +80,12 @@ object ProjectExporter {
         if (music != null) {
             val soundtrack = EditedMediaItem.Builder(MediaItem.fromUri(music))
                 .setRemoveVideo(true)
+                .setEffects(Effects(if (musicVolume < 1f) listOf(volume(musicVolume)) else emptyList(), emptyList()))
                 .build()
             sequences.add(EditedMediaItemSequence(listOf(soundtrack), true))
         }
         val composition = Composition.Builder(sequences)
-            .experimentalSetForceAudioTrack(music == null)
+            .experimentalSetForceAudioTrack(music == null || visuals.any { it.sourceVolume > 0f })
             .build()
         val output = File.createTempFile("nova_", ".mp4", context.cacheDir)
         output.delete()
@@ -122,6 +130,12 @@ object ProjectExporter {
         } catch (error: Exception) {
             output.delete()
             if (continuation.isActive) continuation.resumeWithException(error)
+        }
+    }
+
+    private fun volume(level: Float) = ChannelMixingAudioProcessor().apply {
+        for (channels in 1..8) {
+            putChannelMixingMatrix(ChannelMixingMatrix.create(channels, channels).scaleBy(level))
         }
     }
 

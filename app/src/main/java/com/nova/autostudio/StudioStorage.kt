@@ -13,6 +13,7 @@ internal data class StudioProject(
     val portrait: Boolean = true,
     val fps: Int = 30,
     val referenceAudio: Uri? = null,
+    val musicVolume: Float = 1f,
 )
 
 internal class StudioStorage(context: Context) {
@@ -29,6 +30,7 @@ internal class StudioStorage(context: Context) {
             data.optBoolean("portrait", true),
             data.optInt("fps", 30),
             data.optString("referenceAudio").takeIf { it.isNotEmpty() }?.let(Uri::parse),
+            data.optDouble("musicVolume", 1.0).toFloat(),
         )
     }.getOrDefault(StudioProject())
 
@@ -41,6 +43,7 @@ internal class StudioStorage(context: Context) {
             .put("portrait", project.portrait)
             .put("fps", project.fps)
             .put("referenceAudio", project.referenceAudio?.toString())
+            .put("musicVolume", project.musicVolume.toDouble())
         preferences.edit().putString("project", data.toString()).apply()
     }
 
@@ -57,12 +60,13 @@ internal class StudioStorage(context: Context) {
         .put("uri", clip.uri.toString()).put("title", clip.title).put("mime", clip.mime)
         .put("duration", clip.durationMs).put("start", clip.startMs).put("end", clip.endMs)
         .put("impact", clip.impact.toDouble()).put("animate", clip.animate)
-        .put("glint", clip.glint?.let(::encodeGlint))
+        .put("glint", clip.glint?.let(::encodeGlint)).put("sourceVolume", clip.sourceVolume.toDouble())
 
     private fun decodeClip(data: JSONObject) = StudioClip(
         Uri.parse(data.getString("uri")), data.getString("title"), data.getString("mime"),
         data.getLong("duration"), data.getLong("start"), data.getLong("end"),
         data.optDouble("impact", 0.0).toFloat(), data.optBoolean("animate"), data.optJSONObject("glint")?.let(::decodeGlint),
+        data.optDouble("sourceVolume", 0.0).toFloat(),
     )
 
     private fun encodeStyle(style: ReferenceStyle) = JSONObject()

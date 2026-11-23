@@ -45,6 +45,7 @@ data class StudioClip(
     val impact: Float = 0f,
     val animate: Boolean = false,
     val glint: Glint? = null,
+    val sourceVolume: Float = 0f,
 )
 
 class MainActivity : ComponentActivity() {
@@ -64,6 +65,7 @@ private fun StudioScreen() {
     val resources = remember { mutableStateListOf<StudioClip>().apply { addAll(restored.resources) } }
     var reference by remember { mutableStateOf(restored.reference) }
     var referenceAudio by remember { mutableStateOf(restored.referenceAudio) }
+    var musicVolume by remember { mutableFloatStateOf(restored.musicVolume) }
     var styleNames by remember { mutableStateOf(storage.styleNames()) }
     var styleMenu by remember { mutableStateOf(false) }
     var nameStyle by remember { mutableStateOf(false) }
@@ -82,7 +84,7 @@ private fun StudioScreen() {
     var askNew by remember { mutableStateOf(false) }
 
     LaunchedEffect(storage) {
-        snapshotFlow { StudioProject(clips.toList(), resources.toList(), music, reference, portrait, fps, referenceAudio) }
+        snapshotFlow { StudioProject(clips.toList(), resources.toList(), music, reference, portrait, fps, referenceAudio, musicVolume) }
             .collect { storage.save(it) }
     }
 
@@ -167,7 +169,7 @@ private fun StudioScreen() {
             }
             val start = if (image) 0L else (media.durationMs - length) / 3
             clips[index] = media.copy(startMs = start, endMs = start + length,
-                impact = before.impact, animate = before.animate, glint = before.glint)
+                impact = before.impact, animate = before.animate, glint = before.glint, sourceVolume = if (image) 0f else before.sourceVolume)
             edit()
             status = "Shot replaced"
         }
@@ -214,6 +216,7 @@ private fun StudioScreen() {
         val result = ProjectExporter.render(
             context, clips.toList(), soundtrack,
             if (portrait) 720 else 1280, if (portrait) 1280 else 720, fps,
+            musicVolume = musicVolume,
             onProgress = { progress = it },
         )
         rendered = result
@@ -479,11 +482,32 @@ private fun StudioScreen() {
                     if (current?.mime?.startsWith("video/") == true) {
                         TextButton(enabled = !busy, onClick = {
                             work("Extracting audio…") {
-                                val file = withContext(Dispatchers.IO) { AudioExtractor.extract(context, current.uri) }
+                                val file = withContext(Dispatchers.IO) {
+                                    val worker = coroutineContext
+                                    AudioExtractor.extract(context, current.uri) { fraction ->
+                                        worker.ensureActive()
+                                        scope.launch { if (busy) progress = fraction }
+                                    }
+                                }
                                 share(file, "audio/mp4")
                                 status = "Audio extracted"
                             }
                         }) { Text("Extract") }
+                    }
+                }
+
+                if (music != null || referenceAudio != null) {
+                    Text("Soundtrack volume")
+                    Slider(value = musicVolume, enabled = !busy, onValueChange = {
+                        musicVolume = it
+                        edit()
+                    })
+                    if (current?.mime?.startsWith("video/") == true) {
+                        Text("Selected video volume")
+                        Slider(value = current.sourceVolume, enabled = !busy, onValueChange = {
+                            clips[selected] = current.copy(sourceVolume = it)
+                            edit()
+                        })
                     }
                 }
 
@@ -557,6 +581,7 @@ private fun StudioScreen() {
                         resources.clear()
                         reference = null
                         referenceAudio = null
+                        musicVolume = 1f
                         music = null
                         selected = -1
                         status = ""
